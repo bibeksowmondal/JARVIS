@@ -7,8 +7,42 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from automation.applications import open_application, open_website
+from automation.browser import browser_controller
 
+from automation.file_manager import (
+    initialize_workspace,
+    create_folder,
+    create_file,
+    list_files,
+    read_file,
+    append_file,
+    write_file,
+    copy_file,
+    move_file,
+    rename_file,
+    delete_file,
+    delete_folder,
+)
+
+from automation.applications import (
+    open_application,
+    close_application,
+    minimize_application,
+    maximize_application,
+    switch_application,
+    open_website,
+)
+
+from automation.system_monitor import (
+    get_cpu_usage,
+    get_ram_usage,
+    get_battery_status,
+    get_disk_usage,
+    get_system_info,
+    get_system_status
+)
+
+pending_file_deletion = None
 
 # ==================================================
 # 1. CONFIGURATION
@@ -31,7 +65,7 @@ if not api_key:
 client = genai.Client(
     api_key=api_key,
     http_options=types.HttpOptions(
-        timeout=15000,
+        timeout=50000,
         retry_options=types.HttpRetryOptions(attempts=1),
     ),
 )
@@ -55,29 +89,19 @@ previous_interaction_id = None
 
 recognizer = sr.Recognizer()
 recognizer.dynamic_energy_threshold = True
-recognizer.pause_threshold = 0.8
+recognizer.pause_threshold = 1.0
+recognizer.non_speaking_duration = 0.5
 
 MICROPHONE_INDEX = 1
-
 
 # ==================================================
 # 4. TEXT-TO-SPEECH
 # ==================================================
 
-speaker = pyttsx3.init("sapi5")
-
-voices = speaker.getProperty("voices")
-
-if voices:
-    voice_index = 1 if len(voices) > 1 else 0
-    speaker.setProperty("voice", voices[voice_index].id)
-
-speaker.setProperty("rate", 165)
-speaker.setProperty("volume", 1.0)
 
 
 def speak(text):
-    """Print and speak text using Windows SAPI5."""
+    """Speak JARVIS responses using a fresh SAPI5 engine."""
 
     text = str(text).strip()
 
@@ -86,21 +110,34 @@ def speak(text):
 
     print(f"\nJARVIS: {text}\n", flush=True)
 
+    engine = None
+
     try:
-        
+        engine = pyttsx3.init("sapi5")
 
-        # Ensure the response is passed as a string.
-        speaker.say(text)
+        voices = engine.getProperty("voices")
 
-        # Process the speech queue and wait until playback finishes.
-        speaker.runAndWait()
+        if voices:
+            voice_index = 1 if len(voices) > 1 else 0
+            engine.setProperty("voice", voices[voice_index].id)
 
-        print("[TTS] Speech playback finished.", flush=True)
+        engine.setProperty("rate", 165)
+        engine.setProperty("volume", 1.0)
+
+        engine.say(text)
+        engine.runAndWait()
+
+        print("[TTS] Speech completed successfully.", flush=True)
 
     except Exception as error:
-        print(f"[TTS ERROR] {error}", flush=True)
+        print(
+            f"[TTS ERROR] {type(error).__name__}: {error}",
+            flush=True
+        )
 
-
+    finally:
+        if engine is not None:
+            engine.stop()
 # ==================================================
 # 5. SPEECH RECOGNITION
 # ==================================================
@@ -124,8 +161,8 @@ def listen():
 
             audio = recognizer.listen(
                 source,
-                timeout=8,
-                phrase_time_limit=15,
+                timeout=12,
+                phrase_time_limit=20,
             )
 
         print("Recognizing speech...", flush=True)
@@ -193,11 +230,14 @@ def ask_jarvis(question):
         return answer
 
     except Exception as error:
-        print(f"[AI ERROR] {type(error).__name__}: {error}", flush=True)
+        print(
+            f"[AI ERROR] {type(error).__name__}: {error}", 
+              flush=True
+            )
 
         return (
-            "Sorry, I could not get an answer from the AI service. "
-            "Please check your internet connection and try again."
+            "The AI service is taking too long to respond. "
+            "Please try again."
         )
 
 
@@ -205,34 +245,181 @@ def ask_jarvis(question):
 # 7. COMPUTER AUTOMATION
 # ==================================================
 
+
 def handle_computer_command(question):
-    """Execute only approved local application and website commands."""
 
     text = question.lower().strip()
 
     if text.startswith("jarvis"):
         text = text[len("jarvis"):].strip(" ,.!")
 
-    # Approved Windows applications.
+    # Normalize common voice variations
+    text = text.replace("the ", "")
+
+    print(f"[COMMAND ROUTER] Detected: {text}", flush=True)
+
+    # ==========================================
+    # APPLICATION AUTOMATION
+    # ==========================================
+
+    # Open applications
     for app in ("notepad", "calculator", "paint"):
+
         if text in (
             f"open {app}",
             f"launch {app}",
             f"start {app}",
+            f"open {app} app"
         ):
             return open_application(app)
 
-    # Approved websites.
-    for site in ("google", "youtube", "github"):
+    # Close applications
+    for app in ("notepad", "calculator", "paint"):
+
+        if text in (f"close {app}", f"exit {app}"):
+            return close_application(app)
+
+    # Minimize applications
+    for app in ("notepad", "calculator", "paint"):
+
+        if text in (f"minimize {app}", f"hide {app}"):
+            return minimize_application(app)
+
+    # Maximize applications
+    for app in ("notepad", "calculator", "paint"):
+
+        if text == f"maximize {app}":
+            return maximize_application(app)
+
+    # Switch applications
+    for app in ("notepad", "calculator", "paint"):
+
+        if text in (f"switch to {app}", f"focus {app}"):
+            return switch_application(app)
+
+    # ==========================================
+    # GOOGLE CHROME AUTOMATION
+    # ==========================================
+
+    # Open Chrome
+    if text in (
+        "open chrome",
+        "launch chrome",
+        "start chrome",
+        "open google chrome"
+    ):
+        return browser_controller.open_browser()
+
+    # Close Chrome
+    if text in (
+        "close chrome",
+        "close google chrome",
+        "exit chrome"
+    ):
+        return browser_controller.close_browser()
+
+    # Open common websites in Chrome
+    websites = {
+        "google": "https://www.google.com",
+        "youtube": "https://www.youtube.com",
+        "github": "https://github.com",
+        "stackoverflow": "https://stackoverflow.com"
+    }
+
+    for site, url in websites.items():
+
         if text in (
             f"open {site}",
-            f"open {site} website",
+            f"open {site} website"
         ):
-            return open_website(site)
+            return browser_controller.open_url(url)
+
+    # Google search
+    if text.startswith("search google for "):
+
+        query = text.replace(
+            "search google for ", "", 1
+        )
+
+        return browser_controller.google_search(query)
+
+    # YouTube search
+    if text.startswith("search youtube for "):
+
+        query = text.replace(
+            "search youtube for ", "", 1
+        )
+
+        return browser_controller.youtube_search(query)
+
+    # General Google search
+    if text.startswith("search for "):
+
+        query = text.replace(
+            "search for ", "", 1
+        )
+
+        return browser_controller.google_search(query)
+
+    # Open a custom website
+    if text.startswith("open website "):
+
+        address = text.replace(
+            "open website ", "", 1
+        )
+
+        return browser_controller.open_url(address)
+
+    # Browser tabs
+    if text in (
+        "open new tab",
+        "new tab",
+        "open a new tab"
+    ):
+        return browser_controller.new_tab()
+
+    if text in (
+        "close tab",
+        "close browser tab"
+    ):
+        return browser_controller.close_tab()
+
+    # Browser navigation
+    if text in (
+        "go back",
+        "browser back"
+    ):
+        return browser_controller.go_back()
+
+    if text in (
+        "go forward",
+        "browser forward"
+    ):
+        return browser_controller.go_forward()
+
+    # ==========================================
+    # SYSTEM MONITORING - UNCHANGED
+    # ==========================================
+
+    if text in ("cpu usage", "check cpu", "cpu status"):
+        return get_cpu_usage()
+
+    if text in ("ram usage", "memory usage", "check ram"):
+        return get_ram_usage()
+
+    if text in ("battery status", "check battery"):
+        return get_battery_status()
+
+    if text in ("disk usage", "storage status", "check storage"):
+        return get_disk_usage()
+
+    if text in ("system information", "computer information"):
+        return get_system_info()
+
+    if text in ("system status", "computer status", "full system status"):
+        return get_system_status()
 
     return None
-
-
 # ==================================================
 # 8. MAIN LOOP
 # ==================================================
